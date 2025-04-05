@@ -96,7 +96,6 @@ class Server {
         }
 
         val totalOffsetInMinutes = offsets.values.fold(0L) { acc, offset -> acc + offset }
-        // plus 1, counting the server itself
         val averageOffsetInMinutes = totalOffsetInMinutes / (offsets.size + 1)
         val averageOffset = Duration.ofMinutes(averageOffsetInMinutes)
 
@@ -108,11 +107,11 @@ class Server {
         synchronized(userList) {
             for (user in userList) {
                 try {
-                    val invertedMinutes = -averageOffset.toMinutes()
-                    user.output.println("ADJUST:$invertedMinutes")
+                    val userOffsetInMinutes = offsets[user.username] ?: 0L
+                    val individualAdjustment = Duration.ofMinutes(-userOffsetInMinutes + averageOffsetInMinutes)
+                    user.output.println("ADJUST:${individualAdjustment.toMinutes()}")
 
-                    val adjustment = Duration.ofMinutes(invertedMinutes)
-                    user.setTime(user.getTime().plus(adjustment))
+                    user.setTime(user.getTime().plus(individualAdjustment))
                 } catch (e: Exception) {
                     println("Error sending adjustment to ${user.username}: ${e.message}")
                 }
