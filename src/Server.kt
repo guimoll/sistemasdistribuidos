@@ -4,11 +4,13 @@ import java.time.*
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
+import kotlin.random.Random
 
-class Server : Machine() {
+class Server {
     private val serverSocket = ServerSocket(8080)
     private val userList = mutableListOf<ConnectedUser>()
-    private val offsets = ConcurrentHashMap<String, Duration>()
+    private val offsets = ConcurrentHashMap<String, Long>()
+    private var time: LocalTime = generateRandomTime()
 
     fun start() {
         println("Server started on port 8080")
@@ -22,7 +24,8 @@ class Server : Machine() {
                 val output = PrintWriter(socket.getOutputStream(), true)
 
                 val username = input.readLine()
-                val user = ConnectedUser(username, socket, input, output)
+                val userTime = LocalTime.parse(input.readLine(), DateTimeFormatter.ofPattern("HH:mm"))
+                val user = ConnectedUser(username, socket, input, output, userTime)
                 synchronized(userList) { userList.add(user) }
 
                 println("User '${user.username}' connected.")
@@ -47,9 +50,13 @@ class Server : Machine() {
         try {
             while (true) {
                 val message = user.input.readLine() ?: break
-                when (message.lowercase()) {
-                    "time" -> broadcastTimeReport()
-                    "sync" -> synchronizeTime()
+                when {
+                    message.lowercase() == "time" -> broadcastTimeReport()
+                    message.lowercase() == "sync" -> synchronizeTime()
+                    message.startsWith("OFFSET:") -> {
+                        val offsetInMinutes = message.removePrefix("OFFSET:").toLong()
+                        offsets[user.username] = offsetInMinutes
+                    }
                     else -> broadcast("[${user.username}]: $message")
                 }
             }
@@ -60,13 +67,13 @@ class Server : Machine() {
     }
 
     private fun synchronizeTime() {
-        println("Server time: ${time.format(DateTimeFormatter.ofPattern("HH:mm"))}")
+        println("Server time: ${getTime().format(DateTimeFormatter.ofPattern("HH:mm"))}")
         offsets.clear()
 
         synchronized(userList) {
             for (user in userList) {
                 try {
-                    user.output.println("OFFSET_REQUEST:${time}")
+                    user.output.println("OFFSET_REQUEST:${getTime().format(DateTimeFormatter.ofPattern("HH:mm"))}")
                 } catch (e: Exception) {
                     println("Error sending request to ${user.username}: ${e.message}")
                 }
@@ -75,7 +82,6 @@ class Server : Machine() {
 
         val timeout = 5000L
         val start = System.currentTimeMillis()
-
         while (offsets.size < userList.size && System.currentTimeMillis() - start < timeout) {
             Thread.sleep(100)
         }
@@ -85,26 +91,38 @@ class Server : Machine() {
             return
         }
 
-        val averageOffset = offsets.values
-            .fold(Duration.ZERO) { acc, d -> acc.plus(d) }
-            .dividedBy(offsets.size.toLong())
+        offsets.forEach { (username, offsetInMinutes) ->
+            println("Offset from $username: $offsetInMinutes minutes")
+        }
 
-        time = time.plus(averageOffset)
-        println("Average offset: $averageOffset")
-        println("Adjusted server time: ${time.format(DateTimeFormatter.ofPattern("HH:mm"))}")
+        val totalOffsetInMinutes = offsets.values.fold(0L) { acc, offset -> acc + offset }
+        // plus 1, counting the server itself
+        val averageOffsetInMinutes = totalOffsetInMinutes / (offsets.size + 1)
+        val averageOffset = Duration.ofMinutes(averageOffsetInMinutes)
+
+        println("Average offset: ${averageOffset.toMinutes()}")
+
+        setTime(getTime().plus(averageOffset))
+        println("Adjusted server time: ${getTime().format(DateTimeFormatter.ofPattern("HH:mm"))}")
 
         synchronized(userList) {
             for (user in userList) {
                 try {
-                    user.output.println("ADJUST:${averageOffset}")
-                } catch (_: Exception) {}
+                    val invertedMinutes = -averageOffset.toMinutes()
+                    user.output.println("ADJUST:$invertedMinutes")
+
+                    val adjustment = Duration.ofMinutes(invertedMinutes)
+                    user.setTime(user.getTime().plus(adjustment))
+                } catch (e: Exception) {
+                    println("Error sending adjustment to ${user.username}: ${e.message}")
+                }
             }
         }
     }
 
     private fun broadcastTimeReport() {
         val report = StringBuilder("=== TIME REPORT ===\n")
-        report.append("server: ${time.format(DateTimeFormatter.ofPattern("HH:mm"))}\n")
+        report.append("server: ${getTime().format(DateTimeFormatter.ofPattern("HH:mm"))}\n")
 
         synchronized(userList) {
             for (user in userList) {
@@ -133,14 +151,37 @@ class Server : Machine() {
         broadcast("User '${user.username}' disconnected.")
     }
 
+    private fun generateRandomTime(): LocalTime {
+        val hour = Random.nextInt(0, 24)
+        val minute = Random.nextInt(0, 60)
+        return LocalTime.of(hour, minute)
+    }
+
+    fun getTime(): LocalTime {
+        return time
+    }
+
+    fun setTime(newTime: LocalTime) {
+        time = newTime
+    }
+
     inner class ConnectedUser(
         val username: String,
         val socket: Socket,
         val input: BufferedReader,
-        val output: PrintWriter
-    ) : Machine() {
+        val output: PrintWriter,
+        private var time: LocalTime
+    ) {
         fun getFormattedTime(): String {
-            return time.format(DateTimeFormatter.ofPattern("HH:mm"))
+            return getTime().format(DateTimeFormatter.ofPattern("HH:mm"))
+        }
+
+        fun getTime(): LocalTime {
+            return time
+        }
+
+        fun setTime(newTime: LocalTime) {
+            time = newTime
         }
     }
 }
